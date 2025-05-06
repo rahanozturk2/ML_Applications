@@ -1,0 +1,31 @@
+# 🔹 **Encoder-Decoder DA-RNN Modeli**
+def build_DA_RNN():
+    """
+    DA-RNN Model: Encoder with Input Attention + Decoder with Temporal Attention
+    """
+    # 🔹 **1. Encoder'a Girdi Dikkati (Input Attention) Uygulama**
+    encoder_inputs = Input(shape=(9, 1))  # 9 zaman adımlı girdi
+    prev_hidden_state = Input(shape=(512,))
+    prev_cell_state = Input(shape=(512,))
+    # ⬇️ **1. Önceki Encoder Gizli Durumunu Kullanarak Girdi Ağırlıklarını Öğrenme**
+    attn_score = Dense(1, activation='tanh')(Concatenate()([RepeatVector(9)(prev_hidden_state), RepeatVector(9)(prev_cell_state), encoder_inputs]))
+    attn_weights = tf.keras.activations.softmax(attn_score, axis=1)  # ❗ Zaman boyutuna göre normalize et
+    attended_inputs = Multiply()([encoder_inputs, attn_weights])  
+    # 🔹 **2. Encoder LSTM + Dikkatli Girdi ile Çalışma**
+    encoder_lstm = LSTM(512, return_sequences=True, return_state=True, activation='tanh')
+    encoder_outputs, state_h, state_c = encoder_lstm(attended_inputs)
+    # 🔹 **3. Zamansal Dikkatli Decoder:**
+    decoder_inputs = Input(shape=(1, 1))  # Model tanımlarken input olarak belirlenmeli
+    # **4. Encoder Gizli Durumları Üzerinde Zamansal Dikkat Hesaplama**
+    attn_score_dec = Dense(1, activation='tanh')(Concatenate()([encoder_outputs, RepeatVector(9)(state_h)]))  
+    attn_weights_dec = tf.keras.activations.softmax(attn_score_dec, axis=1)
+    context_vector = Multiply()([encoder_outputs, attn_weights_dec])
+    # 🔹 **5. Decoder LSTM + Önceki Durumları Kullanma**
+    decoder_lstm = LSTM(512, return_sequences=False, return_state=True, activation='tanh')
+    decoder_outputs, _, _ = decoder_lstm(decoder_inputs, initial_state=[state_h, state_c])
+    # 🔹 **6. Bağlam Vektörü (Context Vector) Kullanarak Çıktıyı Hesapla**
+    output_layer = Dense(1, activation='linear')(decoder_outputs)  
+    # 🔹 **7. Modeli Tanımla ve Derle**
+    model = Model(inputs=[encoder_inputs, prev_hidden_state, prev_cell_state, decoder_inputs], outputs=output_layer)
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss='mse')
+    return model
