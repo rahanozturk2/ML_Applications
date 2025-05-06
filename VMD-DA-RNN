@@ -1,31 +1,155 @@
-# 🔹 **Encoder-Decoder DA-RNN Modeli**
+# 🔹 **Encoder–Decoder DA-RNN Model**
 def build_DA_RNN():
     """
     DA-RNN Model: Encoder with Input Attention + Decoder with Temporal Attention
     """
-    # 🔹 **1. Encoder'a Girdi Dikkati (Input Attention) Uygulama**
-    encoder_inputs = Input(shape=(9, 1))  # 9 zaman adımlı girdi
+    # 🔹 **1. Apply Input Attention in the Encoder**
+    encoder_inputs = Input(shape=(9, 1))  # 9 time-step input
     prev_hidden_state = Input(shape=(512,))
     prev_cell_state = Input(shape=(512,))
-    # ⬇️ **1. Önceki Encoder Gizli Durumunu Kullanarak Girdi Ağırlıklarını Öğrenme**
-    attn_score = Dense(1, activation='tanh')(Concatenate()([RepeatVector(9)(prev_hidden_state), RepeatVector(9)(prev_cell_state), encoder_inputs]))
-    attn_weights = tf.keras.activations.softmax(attn_score, axis=1)  # ❗ Zaman boyutuna göre normalize et
-    attended_inputs = Multiply()([encoder_inputs, attn_weights])  
-    # 🔹 **2. Encoder LSTM + Dikkatli Girdi ile Çalışma**
+    attn_score = Dense(1, activation='tanh')(
+        Concatenate()([
+            RepeatVector(9)(prev_hidden_state),
+            RepeatVector(9)(prev_cell_state),
+            encoder_inputs
+        ])
+    )
+    attn_weights = tf.keras.activations.softmax(attn_score, axis=1)  # Normalize over time dimension
+    attended_inputs = Multiply()([encoder_inputs, attn_weights])
+
+    # 🔹 **2. Encoder LSTM with Attended Inputs**
     encoder_lstm = LSTM(512, return_sequences=True, return_state=True, activation='tanh')
     encoder_outputs, state_h, state_c = encoder_lstm(attended_inputs)
-    # 🔹 **3. Zamansal Dikkatli Decoder:**
-    decoder_inputs = Input(shape=(1, 1))  # Model tanımlarken input olarak belirlenmeli
-    # **4. Encoder Gizli Durumları Üzerinde Zamansal Dikkat Hesaplama**
-    attn_score_dec = Dense(1, activation='tanh')(Concatenate()([encoder_outputs, RepeatVector(9)(state_h)]))  
+
+    # 🔹 **3. Temporal Attention Decoder**
+    decoder_inputs = Input(shape=(1, 1))  # Define decoder input shape
+    attn_score_dec = Dense(1, activation='tanh')(
+        Concatenate()([
+            encoder_outputs,
+            RepeatVector(9)(state_h)
+        ])
+    )
     attn_weights_dec = tf.keras.activations.softmax(attn_score_dec, axis=1)
     context_vector = Multiply()([encoder_outputs, attn_weights_dec])
-    # 🔹 **5. Decoder LSTM + Önceki Durumları Kullanma**
+
+    # 🔹 **4. Decoder LSTM with previous states**
     decoder_lstm = LSTM(512, return_sequences=False, return_state=True, activation='tanh')
     decoder_outputs, _, _ = decoder_lstm(decoder_inputs, initial_state=[state_h, state_c])
-    # 🔹 **6. Bağlam Vektörü (Context Vector) Kullanarak Çıktıyı Hesapla**
-    output_layer = Dense(1, activation='linear')(decoder_outputs)  
-    # 🔹 **7. Modeli Tanımla ve Derle**
-    model = Model(inputs=[encoder_inputs, prev_hidden_state, prev_cell_state, decoder_inputs], outputs=output_layer)
+
+    # 🔹 **5. Compute final output**
+    output_layer = Dense(1, activation='linear')(decoder_outputs)
+
+    # 🔹 **6. Define and compile the model**
+    model = Model(
+        inputs=[encoder_inputs, prev_hidden_state, prev_cell_state, decoder_inputs],
+        outputs=output_layer
+    )
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss='mse')
     return model
+
+
+
+# Training loop
+%%time
+# Prepare empty DataFrame to store predictions
+df_predictions = pd.DataFrame()
+T = 9  # 9 time-step input, 1 step prediction
+epochs = 200
+batch_size = 10
+early_stop = tf.keras.callbacks.EarlyStopping(monitor="loss", patience=15, restore_best_weights=True)
+date_list = []
+
+for i in range(8):  # 8 modes
+    print(f"🔹 Training model: {i+1}/8")
+    X_train, y_train = [], []
+
+    # Process each DataFrame separately
+    for key, df in dfs_merged_train.items():
+        series = df[f"WL_ms_dfs_vmd_mod{i+1}"].values  # Wind speed (m/s) for the (i+1)th VMD mode
+        dates = df['date'].values
+        for j in range(T, len(series) - 2):
+            X_train.append(series[j-T:j])
+            y_train.append(series[j+2])
+            if i == 0:
+                date_list.append(dates[j+2])
+
+    X_train = np.array(X_train).reshape(-1, T, 1)
+    y_train = np.array(y_train).reshape(-1, 1)
+
+    model = build_DA_RNN()
+
+    # Initialize hidden and cell states with zeros
+    initial_hidden_state = np.zeros((X_train.shape[0], 512))
+    initial_cell_state = np.zeros((X_train.shape[0], 512))
+
+    history = model.fit(
+        [X_train, initial_hidden_state, initial_cell_state, np.zeros((X_train.shape[0], 1, 1))],
+        y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=0,
+        callbacks=[early_stop]
+    )
+
+    # Save trained model
+    model.save(f"C:\\XXX\\App1_Zhang_LSTM512_Batch10_dfs_T92_{i+1}.keras")
+    print(f"✅ Model {i+1} trained and saved.")
+
+    # Generate predictions on training set
+    predictions = model.predict(
+        [X_train, initial_hidden_state, initial_cell_state, np.zeros((X_train.shape[0], 1, 1))],
+        verbose=0
+    )
+    denorm_predictions = predictions * (22.5 - 0) + 0  # Denormalize predictions
+    df_predictions[f"Mode_{i+1}"] = denorm_predictions.flatten()
+
+# Compute final prediction by summing all modes
+df_predictions["Total_Prediction"] = df_predictions.sum(axis=1)
+df_predictions.insert(0, 'date', date_list)
+
+print("✅ All models trained successfully, predictions saved and denormalized.")
+
+
+# Testing loop
+%%time
+T = 9  # 9 time-step input, 1 step prediction
+df_predictions_1h = pd.DataFrame()
+df1 = dfs_test["df_1"]
+N = len(df1)
+
+# Load saved models
+models = [
+    tf.keras.models.load_model(f"C:\\XXX\\App1_Zhang_LSTM512_Batch10_dfs_T92_{i+1}.keras")
+    for i in range(8)
+]
+
+for step_ in range(0, N - T - 2):
+    # Prepare input series (normalized)
+    input_series = df1.iloc[:step_ + T + 1]["normalized_WL_ms"].values
+
+    # Apply VMD decomposition
+    mod_test, _, _ = VMD(input_series, alpha, tau, K, DC, init, tol)
+
+    # Prepare model input
+    X_input = mod_test[:, -T:].reshape(8, T, 1)
+
+    # Initialize hidden and cell states
+    initial_hidden_state = np.zeros((1, 512))
+    initial_cell_state = np.zeros((1, 512))
+
+    # Make predictions for each mode
+    predictions = [
+        models[i].predict(
+            [X_input[i:i+1], initial_hidden_state, initial_cell_state, np.zeros((1,1,1))],
+            verbose=0
+        ).flatten()[0]
+        for i in range(8)
+    ]
+
+    # Denormalize and record prediction
+    final_prediction = sum(predictions) * 22.5
+    date = df1.iloc[step_ + T + 2]["date"]
+    df_row = pd.DataFrame({"date": [date], "Prediction": [final_prediction]})
+    df_predictions_1h = pd.concat([df_predictions_1h, df_row], ignore_index=True)
+
+    print(f"✅ Prediction: {date} -> {final_prediction}", end="\r")
